@@ -33,6 +33,7 @@ public class BoneConstraintMapperWindow : EditorWindow
     private const float COL_LABEL_W = 150f; // 본 라벨 폭
     private const float COL_FIELD_W = 240f; // ObjectField 폭 (A/B 동일)
     private const float COL_GAP_AB = 14f;  // A-B 사이 간격
+    private const float COL_RC_W = 70f;
 
     private GameObject _sourceRoot; // A
     private GameObject _targetRoot; // B
@@ -191,6 +192,8 @@ public class BoneConstraintMapperWindow : EditorWindow
                 EditorGUILayout.LabelField("A (Source)", GUILayout.Width(COL_FIELD_W));
                 GUILayout.Space(COL_GAP_AB);
                 EditorGUILayout.LabelField("B (Target)", GUILayout.Width(COL_FIELD_W));
+                var style = new GUIStyle(EditorStyles.label) { alignment = TextAnchor.MiddleCenter };
+                EditorGUILayout.LabelField("RC", style, GUILayout.Width(COL_RC_W));
             }
 
             EditorGUILayout.Space(3);
@@ -198,20 +201,30 @@ public class BoneConstraintMapperWindow : EditorWindow
             // ── 본 매핑 라인들 ─────────────────────────────────────────
             foreach (var link in list)
             {
-                using (new EditorGUILayout.HorizontalScope())
+                var rect = EditorGUILayout.BeginHorizontal(); // ★ 행의 전체 rect 확보
+
+                // ★ 체크된 경우, 배경 먼저 그리기 (레이아웃에는 영향 X)
+                if (Event.current.type == EventType.Repaint && link.enabled)
                 {
-                    // 체크박스(적용 여부)
-                    link.enabled = EditorGUILayout.ToggleLeft(GUIContent.none, link.enabled, GUILayout.Width(18));
-
-                    // 라벨 (+ Optional 배지)
-                    var label = link.label + (link.isOptional ? "  (Optional)" : "");
-                    EditorGUILayout.LabelField(label, GUILayout.Width(COL_LABEL_W));
-
-                    // A/B ObjectField: 행 내 라벨 제거(헤더에만 표기), 폭 고정
-                    link.src = (Transform)EditorGUILayout.ObjectField(GUIContent.none, link.src, typeof(Transform), true, GUILayout.Width(COL_FIELD_W));
-                    GUILayout.Space(COL_GAP_AB);
-                    link.dst = (Transform)EditorGUILayout.ObjectField(GUIContent.none, link.dst, typeof(Transform), true, GUILayout.Width(COL_FIELD_W));
+                    var bg = EditorGUIUtility.isProSkin
+                        ? new Color(0.25f, 0.55f, 0.35f, 0.18f)
+                        : new Color(0.45f, 0.75f, 0.55f, 0.18f);
+                    EditorGUI.DrawRect(rect, bg);
                 }
+
+                // 기존 내용 동일
+                link.enabled = EditorGUILayout.ToggleLeft(GUIContent.none, link.enabled, GUILayout.Width(18));
+
+                var label = link.label + (link.isOptional ? "  (Optional)" : "");
+                EditorGUILayout.LabelField(label, GUILayout.Width(COL_LABEL_W));
+
+                link.src = (Transform)EditorGUILayout.ObjectField(GUIContent.none, link.src, typeof(Transform), true, GUILayout.Width(COL_FIELD_W));
+                GUILayout.Space(COL_GAP_AB);
+                link.dst = (Transform)EditorGUILayout.ObjectField(GUIContent.none, link.dst, typeof(Transform), true, GUILayout.Width(COL_FIELD_W));
+
+                DrawRCStatus(link.dst, COL_RC_W);
+
+                EditorGUILayout.EndHorizontal();
             }
 
             EditorGUILayout.Space(4);
@@ -233,6 +246,41 @@ public class BoneConstraintMapperWindow : EditorWindow
                         l.enabled = false;
             }
         }
+    }
+
+    private void DrawRCStatus(Transform dst, float width)
+    {
+        string text;
+        Color col;
+
+        if (dst == null)
+        {
+            text = "-";
+            col = EditorGUIUtility.isProSkin ? new Color(0.6f, 0.6f, 0.6f) : new Color(0.35f, 0.35f, 0.35f);
+        }
+        else
+        {
+            var rc = dst.GetComponent<UnityEngine.Animations.RotationConstraint>();
+            if (rc == null)
+            {
+                text = "없음";
+                col = EditorGUIUtility.isProSkin ? new Color(0.65f, 0.65f, 0.65f) : new Color(0.3f, 0.3f, 0.3f);
+            }
+            else
+            {
+                // On/Off + 소스 수
+                var on = rc.constraintActive;
+                text = on ? $"On ({rc.sourceCount})" : $"Off ({rc.sourceCount})";
+                col = on ? new Color(0.3f, 0.8f, 0.4f) : new Color(1.0f, 0.75f, 0.25f);
+            }
+        }
+
+        // 색상 적용 후 표시
+        var prev = GUI.contentColor;
+        GUI.contentColor = col;
+        var style = new GUIStyle(EditorStyles.miniLabel) { alignment = TextAnchor.MiddleCenter };
+        EditorGUILayout.LabelField(text, style, GUILayout.Width(width));
+        GUI.contentColor = prev;
     }
 
 
@@ -282,177 +330,6 @@ public class BoneConstraintMapperWindow : EditorWindow
                 link.src = s;
             if (dst != null && dst.TryGetValue(link.humanBone, out var d))
                 link.dst = d;
-        }
-    }
-
-    private void NameFallbackIfMissing(List<BoneLink> links)
-    {
-        if (_sourceRoot == null || _targetRoot == null)
-            return;
-
-        var srcAll = _sourceRoot.GetComponentsInChildren<Transform>(true);
-        var dstAll = _targetRoot.GetComponentsInChildren<Transform>(true);
-
-        foreach (var link in links)
-        {
-            if (link.src == null)
-                link.src = FindByKeywords(srcAll, link.label);
-            if (link.dst == null)
-                link.dst = FindByKeywords(dstAll, link.label);
-        }
-    }
-
-    private Transform FindByKeywords(Transform[] all, string label)
-    {
-        // 간단 키워드 매칭: 라벨로 1차, 좌우는 L/R, Left/Right, _L/_R 모두 시도
-        string[] keys = BuildNameKeys(label);
-        foreach (var t in all)
-        {
-            var name = t.name.ToLowerInvariant();
-            foreach (var k in keys)
-            {
-                if (name.Contains(k))
-                    return t;
-            }
-        }
-        return null;
-    }
-
-    private string[] BuildNameKeys(string label)
-    {
-        label = label.ToLowerInvariant();
-        if (label.Contains("left"))
-            return new[] { "left", "l_", "_l", ".l", " l", "hand_l", "arm_l", "shoulder_l" };
-        if (label.Contains("right"))
-            return new[] { "right", "r_", "_r", ".r", " r", "hand_r", "arm_r", "shoulder_r" };
-
-        switch (label)
-        {
-            case "hips":
-                return new[] { "hips", "pelvis", "root" };
-            case "spine":
-                return new[] { "spine", "spn", "sp" };
-            case "chest":
-                return new[] { "chest", "upperchest", "spine2" };
-            case "upperchest":
-                return new[] { "upperchest", "chest2", "spine3" };
-            case "neck":
-                return new[] { "neck", "neck1" };
-            case "head":
-                return new[] { "head" };
-            case "lefthand":
-                return new[] { "lefthand", "hand_l", "lhand" };
-            case "righthand":
-                return new[] { "righthand", "hand_r", "rhand" };
-            case "leftshoulder":
-                return new[] { "leftshoulder", "shoulder_l" };
-            case "rightshoulder":
-                return new[] { "rightshoulder", "shoulder_r" };
-            case "leftupperarm":
-                return new[] { "leftupperarm", "upperarm_l", "uparm_l" };
-            case "rightupperarm":
-                return new[] { "rightupperarm", "upperarm_r", "uparm_r" };
-            case "leftlowerarm":
-                return new[] { "leftlowerarm", "lowerarm_l", "forearm_l" };
-            case "rightlowerarm":
-                return new[] { "rightlowerarm", "lowerarm_r", "forearm_r" };
-            default:
-                return new[] { label };
-        }
-    }
-
-    // ===========================
-    // Humanoid 맵 해석
-    // ===========================
-    private Dictionary<HumanBodyBones, Transform> ResolveHumanoidMap(GameObject root)
-    {
-        if (root == null)
-            return null;
-        var animator = root.GetComponentInChildren<Animator>();
-        if (animator == null || animator.avatar == null)
-            return null;
-        var av = animator.avatar;
-        if (!av.isValid || !av.isHuman)
-            return null;
-
-        var map = new Dictionary<HumanBodyBones, Transform>();
-        foreach (HumanBodyBones h in Enum.GetValues(typeof(HumanBodyBones)))
-        {
-            if (h == HumanBodyBones.LastBone)
-                continue;
-            var t = animator.GetBoneTransform(h);
-            if (t != null)
-                map[h] = t;
-        }
-        return map;
-    }
-
-    // Generic용: 임포터를 잠시 Humanoid로 바꿔 자동매핑을 획득(가능하면)
-    private Dictionary<HumanBodyBones, Transform> TryExtractHumanoidMapViaImporter(GameObject root)
-    {
-        try
-        {
-            if (root == null)
-                return null;
-
-            // 원본 에셋 경로를 찾는다 (Prefab/FBX 등). 씬 전용은 불가.
-            UnityEngine.Object srcAsset = PrefabUtility.GetCorrespondingObjectFromSource(root) ?? root;
-            var path = AssetDatabase.GetAssetPath(srcAsset);
-            if (string.IsNullOrEmpty(path))
-                return null;
-
-            var importer = AssetImporter.GetAtPath(path) as ModelImporter;
-            if (importer == null)
-                return null;
-
-            var origType = importer.animationType;
-            var origAuto = importer.autoGenerateAvatarMappingIfUnspecified;
-
-            try
-            {
-                importer.animationType = ModelImporterAnimationType.Human; // ★ 변경
-                importer.autoGenerateAvatarMappingIfUnspecified = true;                        // ★ 변경
-                importer.SaveAndReimport();
-
-                // 임시로 재임포트된 프리팹/모델을 기준으로 Animator + Avatar 찾기
-                GameObject modelRoot = AssetDatabase.LoadAssetAtPath<GameObject>(path);
-                if (modelRoot == null)
-                    return null;
-
-                // 동일명 Transform 매칭 위해 씬의 root 대신 에셋 루트에서 Animator 확보
-                var anim = modelRoot.GetComponentInChildren<Animator>();
-                if (anim == null || anim.avatar == null || !anim.avatar.isHuman)
-                    return null;
-
-                var tmpMap = new Dictionary<HumanBodyBones, Transform>();
-                foreach (HumanBodyBones h in Enum.GetValues(typeof(HumanBodyBones)))
-                {
-                    if (h == HumanBodyBones.LastBone)
-                        continue;
-                    var t = anim.GetBoneTransform(h);
-                    if (t != null)
-                    {
-                        // 씬 객체의 동일 본 Transform을 찾아야 한다.
-                        // 이름 경로로 역매핑: 씬의 root에서 동일 이름을 탐색
-                        var sceneT = FindByNamePathInScene(root.transform, t);
-                        if (sceneT != null)
-                            tmpMap[h] = sceneT;
-                    }
-                }
-                return tmpMap.Count > 0 ? tmpMap : null;
-            }
-            finally
-            {
-                // 원복
-                importer.animationType = origType;
-                importer.autoGenerateAvatarMappingIfUnspecified = origAuto;
-                importer.SaveAndReimport();
-            }
-        }
-        catch (Exception e)
-        {
-            Debug.LogWarning($"Generic 임시 Humanoid 매핑 실패: {e.Message}");
-            return null;
         }
     }
 
@@ -838,4 +715,16 @@ public class BoneConstraintMapperWindow : EditorWindow
         return null;
     }
 
+    private Texture2D MakeTex(int w, int h, Color c)
+    {
+        var t = new Texture2D(w, h, TextureFormat.RGBA32, false);
+        var fill = new Color32((byte)(c.r * 255), (byte)(c.g * 255), (byte)(c.b * 255), (byte)(c.a * 255));
+        var data = new Color32[w * h];
+        for (int i = 0; i < data.Length; i++)
+            data[i] = fill;
+        t.SetPixels32(data);
+        t.Apply();
+        t.hideFlags = HideFlags.HideAndDontSave;
+        return t;
+    }
 }
